@@ -25,7 +25,7 @@ from frappe.utils.caching import redis_cache
 from frappe.utils.nestedset import get_ancestors_of
 from frappe.utils.safe_exec import get_safe_globals
 
-from erpnext.support.doctype.issue.issue import get_holidays
+from erpnext.support.doctype.issue.issue import calculate_first_response_time, get_holidays
 
 
 class ServiceLevelAgreement(Document):
@@ -475,7 +475,7 @@ def get_repeated(values):
 
 
 def get_documents_with_active_service_level_agreement():
-	sla_doctypes = frappe.cache().hget("service_level_agreement", "active")
+	sla_doctypes = frappe.cache.get_value("doctypes_with_active_sla")
 
 	if sla_doctypes is None:
 		return set_documents_with_active_service_level_agreement()
@@ -484,20 +484,28 @@ def get_documents_with_active_service_level_agreement():
 
 
 def set_documents_with_active_service_level_agreement():
-	active = [
-		sla.document_type for sla in frappe.get_all("Service Level Agreement", fields=["document_type"])
-	]
-	frappe.cache().hset("service_level_agreement", "active", active)
+	try:
+		active = frozenset(
+			sla.document_type for sla in frappe.get_all("Service Level Agreement", fields=["document_type"])
+		)
+		frappe.cache.set_value("doctypes_with_active_sla", active)
+	except (frappe.DoesNotExistError, frappe.db.TableMissingError):
+		# This happens during install / uninstall when wildcard hook for SLA intercepts some doc action.
+		# In both cases, the error can be safely ignored.
+		active = frozenset()
+
 	return active
 
 
 def apply(doc, method=None):
 	# Applies SLA to document on validate
+	flags = frappe.local.flags
+
 	if (
-		frappe.flags.in_patch
-		or frappe.flags.in_migrate
-		or frappe.flags.in_install
-		or frappe.flags.in_setup_wizard
+		flags.in_patch
+		or flags.in_migrate
+		or flags.in_install
+		or flags.in_setup_wizard
 		or doc.doctype not in get_documents_with_active_service_level_agreement()
 	):
 		return
@@ -550,6 +558,8 @@ def handle_status_change(doc, apply_sla_for_resolution):
 	def set_first_response():
 		if doc.meta.has_field("first_responded_on") and not doc.get("first_responded_on"):
 			doc.first_responded_on = now_time
+			if doc.meta.has_field("first_response_time"):
+				doc.first_response_time = calculate_first_response_time(doc, doc.first_responded_on)
 			if get_datetime(doc.get("first_responded_on")) > get_datetime(doc.get("response_by")):
 				record_assigned_users_on_failure(doc)
 

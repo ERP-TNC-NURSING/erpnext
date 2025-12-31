@@ -41,9 +41,19 @@ class POSOpeningEntry(StatusUpdater):
 		self.set_status()
 
 	def validate_pos_profile_and_cashier(self):
-		if self.company != frappe.db.get_value("POS Profile", self.pos_profile, "company"):
+		if not frappe.db.exists("POS Profile", self.pos_profile):
+			frappe.throw(_("POS Profile {} does not exist.").format(self.pos_profile))
+
+		pos_profile_company, pos_profile_disabled = frappe.db.get_value(
+			"POS Profile", self.pos_profile, ["company", "disabled"]
+		)
+
+		if pos_profile_disabled:
+			frappe.throw(_("POS Profile {} is disabled.").format(frappe.bold(self.pos_profile)))
+
+		if self.company != pos_profile_company:
 			frappe.throw(
-				_("POS Profile {} does not belongs to company {}").format(self.pos_profile, self.company)
+				_("POS Profile {} does not belong to company {}").format(self.pos_profile, self.company)
 			)
 
 		if not cint(frappe.db.get_value("User", self.user, "enabled")):
@@ -69,4 +79,7 @@ class POSOpeningEntry(StatusUpdater):
 			frappe.throw(msg.format(", ".join(invalid_modes)), title=_("Missing Account"))
 
 	def on_submit(self):
+		self.set_status(update=True)
+
+	def on_cancel(self):
 		self.set_status(update=True)

@@ -389,10 +389,12 @@ frappe.ui.form.on("BOM", {
 		);
 
 		has_template_rm.forEach((d) => {
+			let bom_qty = dialog.fields_dict.qty?.value || 1;
+
 			dialog.fields_dict.items.df.data.push({
 				item_code: d.item_code,
 				variant_item_code: "",
-				qty: (d.qty / frm.doc.quantity) * (dialog.fields_dict.qty.value || 1),
+				qty: flt(d.qty / frm.doc.quantity) * flt(bom_qty),
 				source_warehouse: d.source_warehouse,
 				operation: d.operation,
 			});
@@ -478,6 +480,10 @@ erpnext.bom.BomController = class BomController extends erpnext.TransactionContr
 
 		if (child.bom_no) {
 			child.bom_no = "";
+		}
+
+		if (doc.item == child.item_code) {
+			child.do_not_explode = 1;
 		}
 
 		get_bom_material_detail(doc, cdt, cdn, scrap_items);

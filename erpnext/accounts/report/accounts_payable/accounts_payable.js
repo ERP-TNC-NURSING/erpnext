@@ -26,16 +26,13 @@ frappe.query_reports["Accounts Payable"] = {
 		{
 			fieldname: "cost_center",
 			label: __("Cost Center"),
-			fieldtype: "Link",
-			options: "Cost Center",
-			get_query: () => {
-				var company = frappe.query_report.get_filter_value("company");
-				return {
-					filters: {
-						company: company,
-					},
-				};
+			fieldtype: "MultiSelectList",
+			get_data: function (txt) {
+				return frappe.db.get_link_options("Cost Center", txt, {
+					company: frappe.query_report.get_filter_value("company"),
+				});
 			},
+			options: "Cost Center",
 		},
 		{
 			fieldname: "party_account",
@@ -59,6 +56,13 @@ frappe.query_reports["Accounts Payable"] = {
 			fieldtype: "Select",
 			options: "Posting Date\nDue Date\nSupplier Invoice Date",
 			default: "Due Date",
+		},
+		{
+			fieldname: "calculate_ageing_with",
+			label: __("Calculate Ageing With"),
+			fieldtype: "Select",
+			options: "Report Date\nToday Date",
+			default: "Report Date",
 		},
 		{
 			fieldname: "range",
@@ -164,7 +168,7 @@ frappe.query_reports["Accounts Payable"] = {
 	},
 };
 
-erpnext.utils.add_dimensions("Accounts Payable", 9);
+erpnext.utils.add_dimensions("Accounts Payable", 10);
 
 function get_party_type_options() {
 	let options = [];

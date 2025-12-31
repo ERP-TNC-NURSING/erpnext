@@ -24,6 +24,13 @@ frappe.query_reports["Accounts Payable Summary"] = {
 			default: "Due Date",
 		},
 		{
+			fieldname: "calculate_ageing_with",
+			label: __("Calculate Ageing With"),
+			fieldtype: "Select",
+			options: "Report Date\nToday Date",
+			default: "Report Date",
+		},
+		{
 			fieldname: "range",
 			label: __("Ageing Range"),
 			fieldtype: "Data",
@@ -38,16 +45,13 @@ frappe.query_reports["Accounts Payable Summary"] = {
 		{
 			fieldname: "cost_center",
 			label: __("Cost Center"),
-			fieldtype: "Link",
-			options: "Cost Center",
-			get_query: () => {
-				var company = frappe.query_report.get_filter_value("company");
-				return {
-					filters: {
-						company: company,
-					},
-				};
+			fieldtype: "MultiSelectList",
+			get_data: function (txt) {
+				return frappe.db.get_link_options("Cost Center", txt, {
+					company: frappe.query_report.get_filter_value("company"),
+				});
 			},
+			options: "Cost Center",
 		},
 		{
 			fieldname: "party_type",
@@ -96,6 +100,11 @@ frappe.query_reports["Accounts Payable Summary"] = {
 		{
 			fieldname: "for_revaluation_journals",
 			label: __("Revaluation Journals"),
+			fieldtype: "Check",
+		},
+		{
+			fieldname: "show_gl_balance",
+			label: __("Show GL Balance"),
 			fieldtype: "Check",
 		},
 	],

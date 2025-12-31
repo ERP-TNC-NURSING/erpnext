@@ -123,6 +123,7 @@ class AssetCapitalization(StockController):
 		self.make_bundle_using_old_serial_batch_fields()
 		self.update_stock_ledger()
 		self.make_gl_entries()
+		self.repost_future_sle_and_gle()
 		self.update_target_asset()
 
 	def on_cancel(self):
@@ -136,7 +137,9 @@ class AssetCapitalization(StockController):
 		)
 		self.update_stock_ledger()
 		self.make_gl_entries()
+		self.repost_future_sle_and_gle()
 		self.restore_consumed_asset_items()
+		self.update_target_asset()
 
 	def set_title(self):
 		self.title = self.target_asset_name or self.target_item_name or self.target_item_code
@@ -360,6 +363,7 @@ class AssetCapitalization(StockController):
 				"voucher_no": self.name,
 				"company": self.company,
 				"allow_zero_valuation": cint(item.get("allow_zero_valuation_rate")),
+				"serial_and_batch_bundle": item.serial_and_batch_bundle,
 			}
 		)
 
@@ -490,14 +494,18 @@ class AssetCapitalization(StockController):
 			asset = frappe.get_doc("Asset", item.asset)
 
 			if asset.calculate_depreciation:
-				notes = _(
-					"This schedule was created when Asset {0} was consumed through Asset Capitalization {1}."
-				).format(
-					get_link_to_form(asset.doctype, asset.name),
-					get_link_to_form(self.doctype, self.get("name")),
-				)
-				depreciate_asset(asset, self.posting_date, notes)
-				asset.reload()
+				frappe.flags.is_composite_component = True
+				try:
+					notes = _(
+						"This schedule was created when Asset {0} was consumed through Asset Capitalization {1}."
+					).format(
+						get_link_to_form(asset.doctype, asset.name),
+						get_link_to_form(self.doctype, self.get("name")),
+					)
+					depreciate_asset(asset, self.posting_date, notes)
+					asset.reload()
+				finally:
+					frappe.flags.is_composite_component = False
 
 			fixed_asset_gl_entries = get_gl_entries_on_asset_disposal(
 				asset,
@@ -601,8 +609,12 @@ class AssetCapitalization(StockController):
 		total_target_asset_value = flt(self.total_value, self.precision("total_value"))
 
 		asset_doc = frappe.get_doc("Asset", self.target_asset)
-		asset_doc.gross_purchase_amount += total_target_asset_value
-		asset_doc.purchase_amount += total_target_asset_value
+		if self.docstatus == 2:
+			asset_doc.gross_purchase_amount -= total_target_asset_value
+			asset_doc.purchase_amount -= total_target_asset_value
+		else:
+			asset_doc.gross_purchase_amount += total_target_asset_value
+			asset_doc.purchase_amount += total_target_asset_value
 		asset_doc.set_status("Work In Progress")
 		asset_doc.flags.ignore_validate = True
 		asset_doc.save()
@@ -752,6 +764,7 @@ def get_consumed_stock_item_details(args):
 				"company": args.company,
 				"serial_no": args.serial_no,
 				"batch_no": args.batch_no,
+				"serial_and_batch_bundle": args.serial_and_batch_bundle,
 			}
 		)
 		out.update(get_warehouse_details(incoming_rate_args))
@@ -873,8 +886,8 @@ def get_items_tagged_to_wip_composite_asset(params):
 		"valuation_rate",
 		"amount",
 		"is_fixed_asset",
-		"parent",
-		"name",
+		"parent as purchase_receipt",
+		"name as purchase_receipt_item",
 	]
 
 	pr_items = frappe.get_all(
@@ -903,7 +916,7 @@ def process_stock_item(d):
 	stock_capitalized = frappe.db.exists(
 		"Asset Capitalization Stock Item",
 		{
-			"purchase_receipt_item": d.name,
+			"purchase_receipt_item": d.purchase_receipt_item,
 			"parentfield": "stock_items",
 			"parenttype": "Asset Capitalization",
 			"docstatus": 1,
@@ -914,7 +927,7 @@ def process_stock_item(d):
 		return None
 
 	stock_item_data = frappe._dict(d)
-	stock_item_data.purchase_receipt_item = d.name
+	stock_item_data.purchase_receipt_item = d.purchase_receipt_item
 	return stock_item_data
 
 
@@ -923,7 +936,7 @@ def process_fixed_asset(d):
 		"Asset",
 		{
 			"item_code": d.item_code,
-			"purchase_receipt": d.parent,
+			"purchase_receipt": d.purchase_receipt,
 			"status": ("not in", ["Draft", "Scrapped", "Sold", "Capitalized"]),
 		},
 		["name as asset", "asset_name", "company"],

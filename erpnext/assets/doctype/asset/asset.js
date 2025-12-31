@@ -72,6 +72,18 @@ frappe.ui.form.on("Asset", {
 				filters: { item_code: doc.item_code },
 			};
 		});
+
+		if (frm.doc.docstatus == 1) {
+			frm.custom_make_buttons = {
+				"Asset Capitalization": "Asset Capitalization",
+			};
+		}
+	},
+
+	before_submit: function (frm) {
+		if (frm.doc.is_composite_asset && !frm.has_active_capitalization) {
+			frappe.throw(__("Please capitalize this asset before submitting."));
+		}
 	},
 
 	refresh: function (frm) {
@@ -194,9 +206,10 @@ frappe.ui.form.on("Asset", {
 						asset: frm.doc.name,
 					},
 					callback: function (r) {
+						frm.has_active_capitalization = r.message;
+
 						if (!r.message) {
-							$(".primary-action").prop("hidden", true);
-							$(".form-message").text("Capitalize this asset to confirm");
+							$(".form-message").text(__("Capitalize this asset before submitting."));
 
 							frm.add_custom_button(__("Capitalize Asset"), function () {
 								frm.trigger("create_asset_capitalization");
@@ -268,8 +281,14 @@ frappe.ui.form.on("Asset", {
 			const row = [
 				sch["idx"],
 				frappe.format(sch["schedule_date"], { fieldtype: "Date" }),
-				frappe.format(sch["depreciation_amount"], { fieldtype: "Currency" }),
-				frappe.format(sch["accumulated_depreciation_amount"], { fieldtype: "Currency" }),
+				frappe.format(sch["depreciation_amount"], {
+					fieldtype: "Currency",
+					options: "Company:company:default_currency",
+				}),
+				frappe.format(sch["accumulated_depreciation_amount"], {
+					fieldtype: "Currency",
+					options: "Company:company:default_currency",
+				}),
 				sch["journal_entry"] || "",
 			];
 
@@ -462,7 +481,6 @@ frappe.ui.form.on("Asset", {
 	is_composite_asset: function (frm) {
 		if (frm.doc.is_composite_asset) {
 			frm.set_value("gross_purchase_amount", 0);
-			frm.set_df_property("gross_purchase_amount", "read_only", 1);
 		} else {
 			frm.set_df_property("gross_purchase_amount", "read_only", 0);
 		}
@@ -530,7 +548,6 @@ frappe.ui.form.on("Asset", {
 			callback: function (r) {
 				var doclist = frappe.model.sync(r.message);
 				frappe.set_route("Form", doclist[0].doctype, doclist[0].name);
-				$(".primary-action").prop("hidden", false);
 			},
 		});
 	},
@@ -658,10 +675,6 @@ frappe.ui.form.on("Asset", {
 					} else {
 						frm.set_value("purchase_invoice_item", data.purchase_invoice_item);
 					}
-
-					let is_editable = !data.is_multiple_items; // if multiple items, then fields should be read-only
-					frm.set_df_property("gross_purchase_amount", "read_only", is_editable);
-					frm.set_df_property("asset_quantity", "read_only", is_editable);
 				}
 			},
 		});
@@ -788,17 +801,33 @@ frappe.ui.form.on("Asset Finance Book", {
 });
 
 erpnext.asset.scrap_asset = function (frm) {
-	frappe.confirm(__("Do you really want to scrap this asset?"), function () {
-		frappe.call({
-			args: {
-				asset_name: frm.doc.name,
+	var scrap_dialog = new frappe.ui.Dialog({
+		title: __("Enter date to scrap asset"),
+		fields: [
+			{
+				label: __("Select the date"),
+				fieldname: "scrap_date",
+				fieldtype: "Date",
+				reqd: 1,
 			},
-			method: "erpnext.assets.doctype.asset.depreciation.scrap_asset",
-			callback: function (r) {
-				cur_frm.reload_doc();
-			},
-		});
+		],
+		size: "medium",
+		primary_action_label: "Submit",
+		primary_action(values) {
+			frappe.call({
+				args: {
+					asset_name: frm.doc.name,
+					scrap_date: values.scrap_date,
+				},
+				method: "erpnext.assets.doctype.asset.depreciation.scrap_asset",
+				callback: function (r) {
+					frm.reload_doc();
+					scrap_dialog.hide();
+				},
+			});
+		},
 	});
+	scrap_dialog.show();
 };
 
 erpnext.asset.restore_asset = function (frm) {

@@ -31,6 +31,14 @@ class SellingController(StockController):
 					)
 				)
 
+		if self.docstatus == 1 and self.doctype in ["Delivery Note", "Sales Invoice"]:
+			self.set_onload(
+				"allow_to_make_qc_after_submission",
+				frappe.db.get_single_value(
+					"Stock Settings", "allow_to_make_quality_inspection_after_purchase_or_delivery"
+				),
+			)
+
 	def validate(self):
 		super().validate()
 		self.validate_items()
@@ -49,12 +57,45 @@ class SellingController(StockController):
 			if self.get(table_field):
 				self.set_serial_and_batch_bundle(table_field)
 
+	def validate_standalone_serial_nos_customer(self):
+		if not self.is_return or self.return_against:
+			return
+
+		if self.doctype in ["Sales Invoice", "Delivery Note"]:
+			bundle_ids = [d.serial_and_batch_bundle for d in self.get("items") if d.serial_and_batch_bundle]
+			if not bundle_ids:
+				return
+
+			serial_nos = frappe.get_all(
+				"Serial and Batch Entry",
+				filters={"parent": ("in", bundle_ids), "serial_no": ("is", "set")},
+				pluck="serial_no",
+			)
+
+			if not serial_nos:
+				return
+
+			if serial_nos := frappe.get_all(
+				"Serial No",
+				filters={"name": ("in", serial_nos), "customer": ("is", "set")},
+				fields=["name", "customer"],
+			):
+				for sn in serial_nos:
+					if sn.customer and sn.customer != self.customer:
+						frappe.throw(
+							_(
+								"Serial No {0} is already assigned to customer {1}. Can only be returned against the customer {1}"
+							).format(frappe.bold(sn.name), frappe.bold(sn.customer)),
+							title=_("Serial No Already Assigned"),
+						)
+
 	def set_missing_values(self, for_validate=False):
 		super().set_missing_values(for_validate)
 
 		# set contact and address details for customer, if they are not mentioned
 		self.set_missing_lead_customer_details(for_validate=for_validate)
 		self.set_price_list_and_item_details(for_validate=for_validate)
+		self.set_company_contact_person()
 
 	def set_missing_lead_customer_details(self, for_validate=False):
 		customer, lead = None, None
@@ -97,6 +138,7 @@ class SellingController(StockController):
 					lead,
 					posting_date=self.get("transaction_date") or self.get("posting_date"),
 					company=self.company,
+					doctype=self.doctype,
 				)
 			)
 
@@ -108,6 +150,13 @@ class SellingController(StockController):
 	def set_price_list_and_item_details(self, for_validate=False):
 		self.set_price_list_currency("Selling")
 		self.set_missing_item_details(for_validate=for_validate)
+
+	def set_company_contact_person(self):
+		"""Set the Company's Default Sales Contact as Company Contact Person."""
+		if self.company and self.meta.has_field("company_contact_person") and not self.company_contact_person:
+			self.company_contact_person = frappe.get_cached_value(
+				"Company", self.company, "default_sales_contact"
+			)
 
 	def remove_shipping_charge(self):
 		if self.shipping_rule:
@@ -316,9 +365,6 @@ class SellingController(StockController):
 	def get_item_list(self):
 		il = []
 		for d in self.get("items"):
-			if d.qty is None:
-				frappe.throw(_("Row {0}: Qty is mandatory").format(d.idx))
-
 			if self.has_product_bundle(d.item_code):
 				for p in self.get("packed_items"):
 					if p.parent_detail_docname == d.name and p.parent_item == d.item_code:
@@ -480,8 +526,15 @@ class SellingController(StockController):
 			if not frappe.get_cached_value("Item", d.item_code, "is_stock_item"):
 				continue
 
+			item_details = frappe.get_cached_value(
+				"Item", d.item_code, ["has_serial_no", "has_batch_no"], as_dict=1
+			)
+
 			if not self.get("return_against") or (
-				get_valuation_method(d.item_code) == "Moving Average" and self.get("is_return")
+				get_valuation_method(d.item_code) == "Moving Average"
+				and self.get("is_return")
+				and not item_details.has_serial_no
+				and not item_details.has_batch_no
 			):
 				# Get incoming rate based on original item cost based on valuation method
 				qty = flt(d.get("stock_qty") or d.get("actual_qty") or d.get("qty"))
@@ -519,6 +572,15 @@ class SellingController(StockController):
 					d.incoming_rate = get_rate_for_return(
 						self.doctype, self.name, d.item_code, self.return_against, item_row=d
 					)
+
+				if (
+					self.get("is_return")
+					and not d.incoming_rate
+					and not self.get("return_against")
+					and not self.is_internal_transfer()
+					and not d.get("allow_zero_valuation_rate")
+				):
+					d.incoming_rate = d.rate
 
 				# For internal transfers use incoming rate as the valuation rate
 				if self.is_internal_transfer():
@@ -558,7 +620,7 @@ class SellingController(StockController):
 					self.doctype, self.name, d.item_code, self.return_against, item_row=d
 				)
 
-	def update_stock_ledger(self):
+	def update_stock_ledger(self, allow_negative_stock=False):
 		self.update_reserved_qty()
 
 		sl_entries = []
@@ -588,7 +650,7 @@ class SellingController(StockController):
 				):
 					sl_entries.append(self.get_sle_for_source_warehouse(d))
 
-		self.make_sl_entries(sl_entries)
+		self.make_sl_entries(sl_entries, allow_negative_stock=allow_negative_stock)
 
 	def get_sle_for_source_warehouse(self, item_row):
 		serial_and_batch_bundle = (
@@ -950,6 +1012,9 @@ def set_default_income_account_for_item(obj):
 
 def get_serial_and_batch_bundle(child, parent, delivery_note_child=None):
 	from erpnext.stock.serial_batch_bundle import SerialBatchCreation
+
+	if parent.get("is_return") and parent.get("packed_items"):
+		return
 
 	if child.get("use_serial_batch_fields"):
 		return

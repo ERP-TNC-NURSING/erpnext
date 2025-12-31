@@ -18,7 +18,7 @@ from erpnext.accounts.doctype.accounting_dimension_filter.accounting_dimension_f
 )
 from erpnext.accounts.doctype.accounting_period.accounting_period import ClosedAccountingPeriod
 from erpnext.accounts.doctype.budget.budget import validate_expense_against_budget
-from erpnext.accounts.utils import create_payment_ledger_entry
+from erpnext.accounts.utils import create_payment_ledger_entry, is_immutable_ledger_enabled
 from erpnext.exceptions import InvalidAccountDimensionError, MandatoryAccountDimensionError
 
 
@@ -81,6 +81,10 @@ def make_acc_dimensions_offsetting_entry(gl_map):
 					"credit_in_account_currency": credit,
 					"remarks": _("Offsetting for Accounting Dimension") + f" - {dimension.name}",
 					"against_voucher": None,
+					"account_currency": dimension.account_currency,
+					# Party Type and Party are restricted to Receivable and Payable accounts
+					"party_type": None,
+					"party": None,
 				}
 			)
 			offsetting_entry["against_voucher_type"] = None
@@ -108,6 +112,9 @@ def get_accounting_dimensions_for_offsetting_entry(gl_map, company):
 	accounting_dimensions_to_offset = []
 	for acc_dimension in acc_dimensions:
 		values = set([entry.get(acc_dimension.fieldname) for entry in gl_map])
+		acc_dimension.account_currency = frappe.get_cached_value(
+			"Account", acc_dimension.offsetting_account, "account_currency"
+		)
 		if len(values) > 1:
 			accounting_dimensions_to_offset.append(acc_dimension)
 
@@ -179,9 +186,26 @@ def process_gl_map(gl_map, merge_entries=True, precision=None, from_repost=False
 
 
 def distribute_gl_based_on_cost_center_allocation(gl_map, precision=None, from_repost=False):
+	round_off_account, default_currency = frappe.get_cached_value(
+		"Company", gl_map[0].company, ["round_off_account", "default_currency"]
+	)
+	if not precision:
+		precision = get_field_precision(
+			frappe.get_meta("GL Entry").get_field("debit"),
+			currency=default_currency,
+		)
+
 	new_gl_map = []
 	for d in gl_map:
 		cost_center = d.get("cost_center")
+
+		cost_center_allocation = get_cost_center_allocation_data(
+			gl_map[0]["company"], gl_map[0]["posting_date"], cost_center
+		)
+
+		if not cost_center_allocation:
+			new_gl_map.append(d)
+			continue
 
 		# Validate budget against main cost center
 		if not from_repost:
@@ -189,10 +213,8 @@ def distribute_gl_based_on_cost_center_allocation(gl_map, precision=None, from_r
 				d, expense_amount=flt(d.debit, precision) - flt(d.credit, precision)
 			)
 
-		cost_center_allocation = get_cost_center_allocation_data(
-			gl_map[0]["company"], gl_map[0]["posting_date"], cost_center
-		)
-		if not cost_center_allocation:
+		if d.account == round_off_account:
+			d.cost_center = cost_center_allocation[0][0]
 			new_gl_map.append(d)
 			continue
 
@@ -268,7 +290,9 @@ def merge_similar_entries(gl_map, precision=None):
 	company_currency = erpnext.get_company_currency(company)
 
 	if not precision:
-		precision = get_field_precision(frappe.get_meta("GL Entry").get_field("debit"), company_currency)
+		precision = get_field_precision(
+			frappe.get_meta("GL Entry").get_field("debit"), currency=company_currency
+		)
 
 	# filter zero debit and credit entries
 	merged_gl_map = filter(
@@ -298,6 +322,8 @@ def get_merge_properties(dimensions=None):
 		"project",
 		"finance_book",
 		"voucher_no",
+		"advance_voucher_type",
+		"advance_voucher_no",
 	]
 	if dimensions:
 		merge_properties.extend(dimensions)
@@ -389,7 +415,11 @@ def make_entry(args, adv_adj, update_outstanding, from_repost=False):
 	gle.flags.notify_update = False
 	gle.submit()
 
-	if not from_repost and gle.voucher_type != "Period Closing Voucher":
+	if (
+		not from_repost
+		and gle.voucher_type != "Period Closing Voucher"
+		and (gle.is_cancelled == 0 or gle.voucher_type == "Journal Entry")
+	):
 		validate_expense_against_budget(args)
 
 
@@ -625,6 +655,7 @@ def make_reverse_gl_entries(
 	adv_adj=False,
 	update_outstanding="Yes",
 	partial_cancel=False,
+	posting_date=None,
 ):
 	"""
 	Get original gl entries of the voucher
@@ -685,7 +716,18 @@ def make_reverse_gl_entries(
 				query.run()
 		else:
 			if not immutable_ledger_enabled:
-				set_as_cancel(gl_entries[0]["voucher_type"], gl_entries[0]["voucher_no"])
+				gle_names = [x.get("name") for x in gl_entries]
+
+				# if names are available, cancel only that set of entries
+				if not all(gle_names):
+					set_as_cancel(gl_entries[0]["voucher_type"], gl_entries[0]["voucher_no"])
+				else:
+					frappe.db.sql(
+						"""UPDATE `tabGL Entry` SET is_cancelled = 1,
+						modified=%s, modified_by=%s
+						where name in %s and is_cancelled = 0""",
+						(now(), frappe.session.user, tuple(gle_names)),
+					)
 
 		for entry in gl_entries:
 			new_gle = copy.deepcopy(entry)
@@ -711,6 +753,8 @@ def make_reverse_gl_entries(
 			if immutable_ledger_enabled:
 				new_gle["is_cancelled"] = 0
 				new_gle["posting_date"] = frappe.form_dict.get("posting_date") or getdate()
+			elif posting_date:
+				new_gle["posting_date"] = posting_date
 
 			if new_gle["debit"] or new_gle["credit"]:
 				make_entry(new_gle, adv_adj, "Yes")
@@ -804,7 +848,3 @@ def validate_allowed_dimensions(gl_entry, dimension_filter_map):
 						),
 						InvalidAccountDimensionError,
 					)
-
-
-def is_immutable_ledger_enabled():
-	return frappe.db.get_single_value("Accounts Settings", "enable_immutable_ledger")
